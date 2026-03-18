@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
-def iter_requests(spinalcord_root: str) -> Iterator[dict[str, Any]]:
+def iter_request_files(spinalcord_root: str) -> Iterator[tuple[Path, dict[str, Any]]]:
     """
     Rationale: File-based queue semantics.
 
@@ -26,8 +26,17 @@ def iter_requests(spinalcord_root: str) -> Iterator[dict[str, Any]]:
 
     requests_dir = Path(spinalcord_root) / "requests"
     if not requests_dir.exists():
-        return iter(())
+        return
 
     for p in sorted(requests_dir.glob("*.json")):
-        yield json.loads(p.read_text(encoding="utf-8"))
+        yield p, json.loads(p.read_text(encoding="utf-8"))
+
+
+def iter_requests(spinalcord_root: str) -> Iterator[dict[str, Any]]:
+    """
+    Rationale: Backwards-compatible adapter for scaffolding code.
+    """
+
+    for _p, data in iter_request_files(spinalcord_root):
+        yield data
 

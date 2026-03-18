@@ -13,6 +13,7 @@ Contracts:
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 
 from shared_schemas.research_discovery import ResearchDiscovery
@@ -38,11 +39,17 @@ def write_research_discovery(spinalcord_root: str, discovery: ResearchDiscovery)
 
     out_dir = _ensure_dir(spinalcord_root, "discoveries")
     out_path = out_dir / f"{discovery.discovery_id}.json"
+
+    # Deterministic idempotency: if already present, do not overwrite.
     if out_path.exists():
         return out_path
-    out_path.write_text(
+
+    # Atomic write: write to a temp file then rename into place.
+    tmp_path = out_dir / f".tmp-{discovery.discovery_id}-{uuid.uuid4().hex}.json"
+    tmp_path.write_text(
         json.dumps(discovery.model_dump(mode="json"), sort_keys=True),
         encoding="utf-8",
     )
+    tmp_path.replace(out_path)
     return out_path
 
