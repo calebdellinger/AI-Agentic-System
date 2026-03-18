@@ -1,0 +1,68 @@
+version: "3.9"
+
+services:
+  trinity-api:
+    build:
+      context: .
+      dockerfile: business-trinity/Dockerfile
+    container_name: trinity-api
+    environment:
+      - PROVIDER_MODE=${PROVIDER_MODE:-LOCAL}
+      - FALLBACK_PROVIDER_MODE=${FALLBACK_PROVIDER_MODE:-GEMINI}
+      - N8N_WORKORDER_WEBHOOK_URL=${N8N_WORKORDER_WEBHOOK_URL:-http://n8n:5678/webhook/trinity-workorder}
+      - N8N_WORKORDER_WEBHOOK_SECRET=${N8N_WORKORDER_WEBHOOK_SECRET:-change-me}
+      - RHYTHM_STORAGE_ROOT=/rhythms
+      - SPINALCORD_ROOT=/spinalcord
+    volumes:
+      - spinalcord:/spinalcord
+      - trinity_rhythms:/rhythms
+    networks:
+      - net_internal
+
+  rd-lab-worker:
+    build:
+      context: .
+      dockerfile: rd-lab/Dockerfile
+    container_name: rd-lab-worker
+    environment:
+      - PROVIDER_MODE=${PROVIDER_MODE:-LOCAL}
+      - RHYTHM_STORAGE_ROOT=/rhythms
+      - SPINALCORD_ROOT=/spinalcord
+    volumes:
+      - spinalcord:/spinalcord
+      - lab_rhythms:/rhythms
+    networks:
+      - net_lab
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_HOST=${N8N_HOST:-localhost}
+      - N8N_PORT=${N8N_PORT:-5678}
+      - WEBHOOK_URL=${WEBHOOK_URL:-http://localhost:5678}
+      - NODE_ENV=production
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:-change-me}
+    volumes:
+      - n8n_data:/home/node/.n8n
+    networks:
+      - net_internal
+
+# NOTE: vLLM is expected to be provided separately as a sibling service/container
+# named `vllm-server` on the same Docker network(s) so `LOCAL` provider mode can
+# resolve `http://vllm-server:8000/v1`.
+
+volumes:
+  spinalcord:
+  trinity_rhythms:
+  lab_rhythms:
+  n8n_data:
+
+networks:
+  net_internal:
+  net_lab:
+    internal: true
+

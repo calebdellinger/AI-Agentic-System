@@ -1,0 +1,12 @@
+{
+  "name": "trinity-workorder-to-notion (scaffolding)",
+  "_rationale": "Rationale: n8n is the only external-action gateway. This workflow consumes Trinity WorkOrder JSON and executes Notion operations without hemispheres directly calling Notion.",
+  "_how": "How: Placeholder workflow spec. Implementation will map `operation` and `payload` fields from the WorkOrder schema to the appropriate Notion node actions.",
+  "_contracts": [
+    "Trinity posts WorkOrder to n8n webhook",
+    "n8n returns a WorkOrderResult payload",
+    "Secrets are stored in n8n local credentials (n8n_data volume)"
+  ],
+  "scaffold_only": true
+}
+

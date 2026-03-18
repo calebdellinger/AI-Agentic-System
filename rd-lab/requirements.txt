@@ -1,0 +1,13 @@
+# Rationale: Documented runtime dependencies for the RD Lab service.
+# How: Docker installs these packages; versions remain unpinned for
+# scaffolding-stage portability.
+# Contracts:
+# - The Lab must not rely on outbound internet from the container.
+# - DinD sandbox runner will enforce `--network none` for inner workloads.
+
+pydantic>=2
+python-dotenv>=1.0
+
+# Agentic framework (used once we implement the debate/innovation loop)
+autogen
+

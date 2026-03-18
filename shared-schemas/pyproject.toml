@@ -1,0 +1,21 @@
+[project]
+name = "shared-schemas"
+version = "0.1.0"
+description = "Sovereign AI OS shared Pydantic schemas (Spinal Cord bridge)."
+requires-python = ">=3.11"
+
+# Rationale: Keep dependencies minimal and framework-agnostic.
+# How: Schema validation should not import hemisphere-specific frameworks.
+# Contracts: Runtime libraries provide only Pydantic + dotenv for config loading.
+dependencies = [
+  "pydantic>=2",
+  "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+

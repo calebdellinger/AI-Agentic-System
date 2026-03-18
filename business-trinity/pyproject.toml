@@ -1,0 +1,17 @@
+[project]
+name = "business-trinity"
+version = "0.1.0"
+description = "Business Trinity hemisphere: CrewAI/LangChain orchestration and work-order creation."
+requires-python = ">=3.11"
+
+# Rationale: Service code depends on the shared schemas package but will
+# import it via PYTHONPATH during scaffolding.
+# How: Docker images will set PYTHONPATH to include `shared-schemas/src`.
+dependencies = [
+  "pydantic>=2",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+

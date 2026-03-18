@@ -1,0 +1,17 @@
+[project]
+name = "rd-lab"
+version = "0.1.0"
+description = "RD Lab hemisphere: AutoGen debate inside a DinD sandbox (air-gapped)."
+requires-python = ">=3.11"
+
+# Rationale: Lab code imports shared schemas but should not embed external
+# side-effect execution; it only writes schema-validated artifacts to the
+# shared volume.
+dependencies = [
+  "pydantic>=2",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+

@@ -1,0 +1,23 @@
+# Rationale: Prevent committing local runtime artifacts and secrets.
+# How: Gitignore patterns keep generated data, volumes, and credentials out of
+# the repository.
+# Contracts: Does not affect runtime; only impacts version control hygiene.
+
+**/.venv/
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.mypy_cache/
+
+# Local env
+.env
+
+# Logs / rhythms (mounted volumes will create these at runtime)
+**/rhythms/
+**/spinalcord/
+**/lab_rhythms/
+**/trinity_rhythms/
+
+# n8n persistent storage
+**/.n8n/
+

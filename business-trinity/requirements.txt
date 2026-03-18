@@ -1,0 +1,20 @@
+# Rationale: Documented runtime dependencies for the Business Trinity service.
+# How: Docker installs these packages; versions remain unpinned for
+# scaffolding-stage portability.
+# Contracts: Keep sovereign defaults (local rhythms/spinalcord only).
+
+fastapi
+uvicorn[standard]
+requests
+pydantic>=2
+python-dotenv>=1.0
+
+# Agentic framework (used later by CrewAI orchestration)
+crewai
+langchain
+
+# Optional: model routing helpers (used once provider build is integrated)
+langchain-openai
+langchain-google-genai
+langchain-anthropic
+
