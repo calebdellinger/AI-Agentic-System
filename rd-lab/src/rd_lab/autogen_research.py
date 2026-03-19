@@ -33,6 +33,7 @@ from shared_schemas.research_discovery import ResearchDiscovery
 from rd_lab.bridge.outbox import write_research_discovery
 from rd_lab.models.research_request import ResearchRequest
 from rd_lab.storage.log_writer import append_rhythm_event
+from rd_lab.throttle.routing_rules import compute_initial_tier, should_upgrade_to_heavy
 
 
 MAX_VALIDATION_ATTEMPTS = 3
@@ -126,18 +127,6 @@ def _extract_first_json_object(text: str) -> str:
                     return text[start : i + 1]
 
     raise ValueError("No balanced JSON object detected in model output")
-
-
-def _parse_discovery_from_autogen_text(text: str) -> ResearchDiscovery:
-    """
-    Rationale: Convert AutoGen output text into validated schema.
-
-    How:
-    - Extract JSON from the text.
-    - Validate with `ResearchDiscovery`.
-    """
-
-    raise NotImplementedError
 
 
 def _coerce_confidence(value: Any) -> float:
@@ -323,7 +312,7 @@ def _parse_discovery_from_autogen_text(text: str, *, request: ResearchRequest) -
     return ResearchDiscovery.model_validate(normalized)
 
 
-def _build_llm_config_for_autogen():
+def _build_llm_config_for_autogen(*, model: str, temperature: float) -> dict[str, Any]:
     """
     Rationale: Bridge shared provider config into AutoGen's LLM config.
 
@@ -337,10 +326,10 @@ def _build_llm_config_for_autogen():
     settings = get_provider_settings()
     if settings.provider_mode != "LOCAL":
         raise ValueError(
-            f"rd-lab scaffolding currently assumes LOCAL provider mode; got {settings.provider_mode}"
+            "rd-lab debate loop currently assumes LOCAL provider mode (OpenAI-compatible endpoint). "
+            f"Got {settings.provider_mode!r}."
         )
 
-    model = settings.model_name or "local-model"
     # Rationale: AutoGen's ConversableAgent expects OpenAI-compatible config_list.
     return {
         "config_list": [
@@ -350,7 +339,10 @@ def _build_llm_config_for_autogen():
                 "api_key": "local",
             }
         ],
-        "temperature": float(os.getenv("AUTOGEN_TEMPERATURE", "0.2")),
+        "temperature": float(temperature),
+        # Rationale: Prevent indefinitely blocked calls on local runtimes.
+        # How: Force agent turns to fail-fast so queue processing can continue.
+        "timeout": int(os.getenv("AUTOGEN_REQUEST_TIMEOUT_SECONDS", "45")),
     }
 
 
@@ -384,46 +376,90 @@ def _extract_chat_last_content(chat_result: Any) -> str:
     raise ValueError("Unable to extract model output from AutoGen result")
 
 
-def _run_autogen_research_json(request: ResearchRequest) -> str:
+def _run_autogen_research_json(*, request: ResearchRequest, model: str, temperature: float) -> str:
     """
     Rationale: AutoGen debate loop should return candidate discovery JSON.
 
     How:
-    - Uses two AutoGen agents (researcher + critic) to improve adherence
-      to the schema.
-    - The critic is instructed to output a corrected JSON object.
+    - Uses six specialized debate agents plus one orchestrator proxy in a
+      GroupChat:
+      `oracle`, `disruptor`, `alchemist`, `visionary`, `contrarian`,
+      `synthesizer`, and `user_proxy`.
+    - The `synthesizer` is responsible for final JSON output aligned to
+      `ResearchDiscovery`.
 
     Contracts:
-    - Both agents are configured with `code_execution_config=False` so the
-      debate is not allowed to run code.
-    - Output must be JSON-only (critic enforces correction).
+    - All agents are configured with `code_execution_config=False` so the
+      debate does not execute code.
+    - Output must be JSON-only; we read the final synthesizer content.
     """
 
     # Local import so scaffolding doesn't break if autogen changes.
     from autogen import AssistantAgent, UserProxyAgent
 
-    llm_config = _build_llm_config_for_autogen()
+    llm_config = _build_llm_config_for_autogen(model=model, temperature=temperature)
 
-    researcher = AssistantAgent(
-        name="researcher",
+    oracle = AssistantAgent(
+        name="oracle",
         system_message=(
-            "You are the Mad Scientist researcher. "
-            "Your task is to output a SINGLE JSON object that validates "
-            "against the shared_schemas.ResearchDiscovery schema. "
-            "Output JSON ONLY (no markdown, no commentary). "
-            "Use EXACT field names and EXACT types."
+            "You are the Oracle. Your task is to find raw patterns and data "
+            "at the intersection of Natural Sciences and Arts. Look for "
+            "'weird' correlations that others miss."
         ),
         llm_config=llm_config,
         code_execution_config=False,
     )
 
-    critic = AssistantAgent(
-        name="critic",
+    disruptor = AssistantAgent(
+        name="disruptor",
         system_message=(
-            "You are the Constitution critic. "
-            "You validate and correct JSON so it matches the "
-            "shared_schemas.ResearchDiscovery schema exactly. "
-            "Output JSON ONLY."
+            "You are the Disruptor. You focus on radical engineering efficiency. "
+            "Challenge every physical constraint. Propose impossible architectures "
+            "that might just work."
+        ),
+        llm_config=llm_config,
+        code_execution_config=False,
+    )
+
+    alchemist = AssistantAgent(
+        name="alchemist",
+        system_message=(
+            "You are the Alchemist. You turn features into gold. Your job is to "
+            "analyze how this innovation hits the lizard brain of the consumer. "
+            "Focus on Social Sciences and Economics."
+        ),
+        llm_config=llm_config,
+        code_execution_config=False,
+    )
+
+    visionary = AssistantAgent(
+        name="visionary",
+        system_message=(
+            "You are the Visionary. You provide the Humanities context. Ensure "
+            "the innovation has historical depth and cultural resonance."
+        ),
+        llm_config=llm_config,
+        code_execution_config=False,
+    )
+
+    contrarian = AssistantAgent(
+        name="contrarian",
+        system_message=(
+            "You are the Contrarian. You brutally critique the group's output. "
+            "Point out logic gaps, ethical failures, and boring ideas. "
+            "Force the others to be more radical but more precise."
+        ),
+        llm_config=llm_config,
+        code_execution_config=False,
+    )
+
+    synthesizer = AssistantAgent(
+        name="synthesizer",
+        system_message=(
+            "You are the Synthesizer. Your ONLY job is to take the debate and "
+            "output a SINGLE JSON object that validates against the "
+            "shared_schemas.ResearchDiscovery schema. Output JSON ONLY. "
+            "Use EXACT field names and types."
         ),
         llm_config=llm_config,
         code_execution_config=False,
@@ -432,6 +468,8 @@ def _run_autogen_research_json(request: ResearchRequest) -> str:
     user_proxy = UserProxyAgent(
         name="user_proxy",
         human_input_mode="NEVER",
+        max_consecutive_auto_reply=10,
+        is_termination_msg=lambda x: "discovery_id" in x.get("content", "").lower(),
         code_execution_config=False,
     )
 
@@ -467,42 +505,47 @@ def _run_autogen_research_json(request: ResearchRequest) -> str:
         "artifact_refs": [],
     }
 
-    # Step 1: researcher attempts schema-shaped JSON.
-    researcher_chat = user_proxy.initiate_chat(
-        researcher,
-        message=(
-            "Produce a ResearchDiscovery JSON object that matches this exact schema template. "
-            "Replace placeholder values with your own content based on the request. "
-            "Strict rules: "
-            "1) findings must be a list of objects with keys claim/support_summary/confidence (confidence is a number 0..1). "
-            "2) next_questions must be a list of strings (NOT objects). "
-            "3) schema_version must be exactly \"0.1.0\". "
-            "4) correlation_id must equal the request correlation_id. "
-            "5) artifact_refs must be a list of dict[str,str] (use [] if unsure).\n\n"
-            f"Request JSON: {json.dumps(discovery_prompt, ensure_ascii=False)}\n\n"
-            f"Schema Template: {json.dumps(schema_template, ensure_ascii=False)}\n\n"
-            "Return JSON ONLY."
-        ),
-        max_turns=2,
-        silent=True,
+    # Rationale: GroupChat with small local models can stall and never emit a
+    # terminal state. Deterministic one-turn-per-specialist orchestration keeps
+    # the 7-agent design while guaranteeing completion.
+    debate_prompt = (
+        "Provide concise specialist input for this request.\n\n"
+        f"Request: {json.dumps(discovery_prompt, ensure_ascii=False)}\n"
+        "Return plain text bullets only."
     )
-    researcher_text = _extract_chat_last_content(researcher_chat)
 
-    # Step 2: critic corrects and outputs JSON-only.
-    critic_chat = user_proxy.initiate_chat(
-        critic,
-        message=(
-            "Here is the candidate JSON (may be invalid). "
-            "Validate and correct it so it matches ResearchDiscovery schema EXACTLY. "
-            "Strictly enforce: findings as list of {claim,support_summary,confidence}; "
-            "next_questions as list[str]. Return JSON ONLY.\n\n"
-            f"Candidate:\n{researcher_text}\n"
-        ),
-        max_turns=2,
+    specialist_notes: list[str] = []
+    for specialist in [oracle, disruptor, alchemist, visionary, contrarian]:
+        result = user_proxy.initiate_chat(
+            specialist,
+            message=debate_prompt,
+            max_turns=1,
+            silent=True,
+        )
+        text = _extract_chat_last_content(result)
+        specialist_notes.append(f"{specialist.name}: {text}")
+
+    synthesis_prompt = (
+        "You are finalizing the debate into one strict ResearchDiscovery JSON object.\n\n"
+        f"Request JSON: {json.dumps(discovery_prompt, ensure_ascii=False)}\n"
+        f"Schema Template: {json.dumps(schema_template, ensure_ascii=False)}\n\n"
+        "Specialist Notes:\n"
+        + "\n\n".join(specialist_notes)
+        + "\n\nOutput constraints:\n"
+        "1) findings is list[{claim,support_summary,confidence}] where confidence is number in [0,1]\n"
+        "2) next_questions is list[str]\n"
+        "3) schema_version == \"0.1.0\"\n"
+        "4) correlation_id must equal request correlation_id\n"
+        "5) artifact_refs is list[dict[str,str]] (or empty list)\n"
+        "6) Output JSON ONLY."
+    )
+    synth_result = user_proxy.initiate_chat(
+        synthesizer,
+        message=synthesis_prompt,
+        max_turns=1,
         silent=True,
     )
-    critic_text = _extract_chat_last_content(critic_chat)
-    return critic_text
+    return _extract_chat_last_content(synth_result)
 
 
 @dataclass(frozen=True)
@@ -542,25 +585,56 @@ def run_autogen_with_pydantic_retries(
         record_id=request.linked_decision_record_id,
     )
 
-    #region debug_log_H1_model_usage
+    # Model selection / throttle knobs.
+    light_model = os.getenv("LOCAL_LIGHT_MODEL_NAME") or os.getenv("MODEL_NAME") or "llama3.2:1b"
+    heavy_model = os.getenv("LOCAL_HEAVY_MODEL_NAME") or "llama3.2:3b"
+    light_temp = float(os.getenv("AUTOGEN_TEMPERATURE_LIGHT", "0.2"))
+    heavy_temp = float(os.getenv("AUTOGEN_TEMPERATURE_HEAVY", "0.1"))
+
+    initial_tier = compute_initial_tier(
+        research_question=request.research_question,
+        constraints=request.constraints,
+    )
+
     provider_settings = get_provider_settings()
     _append_debug_log(
         hypothesis_id="H1_model_usage",
         location="run_autogen_with_pydantic_retries:init",
-        message="Starting AutoGen debate run with provider settings.",
+        message="Starting AutoGen debate run with throttle policy.",
         data={
             "provider_mode": provider_settings.provider_mode,
-            "fallback_provider_mode": provider_settings.fallback_provider_mode,
             "vllm_base_url": provider_settings.vllm_base_url,
-            "model_name": provider_settings.model_name,
+            "light_model": light_model,
+            "heavy_model": heavy_model,
+            "initial_tier": initial_tier,
+            "request_constraints": request.constraints,
             "max_validation_attempts": MAX_VALIDATION_ATTEMPTS,
         },
     )
-    #endregion
 
     last_error: Optional[dict[str, Any]] = None
     for attempt in range(1, MAX_VALIDATION_ATTEMPTS + 1):
-        candidate_text = _run_autogen_research_json(request)
+        selected_heavy = should_upgrade_to_heavy(initial_tier=initial_tier, attempt=attempt)
+        selected_model = heavy_model if selected_heavy else light_model
+        selected_temp = heavy_temp if selected_heavy else light_temp
+
+        _append_debug_log(
+            hypothesis_id="H1_model_usage",
+            location="run_autogen_with_pydantic_retries:select_model",
+            message="Selected model tier for this attempt.",
+            data={
+                "attempt": attempt,
+                "selected_heavy": selected_heavy,
+                "selected_model": selected_model,
+                "selected_temp": selected_temp,
+            },
+        )
+
+        candidate_text = _run_autogen_research_json(
+            request=request,
+            model=selected_model,
+            temperature=selected_temp,
+        )
 
         #region debug_log_H4_chat_output
         _append_debug_log(

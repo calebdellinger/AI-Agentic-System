@@ -1,0 +1,7 @@
+{
+  "schema_version": "0.1.0",
+  "correlation_id": "66666666-6666-6666-6666-666666666666",
+  "research_question": "Identify two robust anti-schema-drift patterns for JSON handoffs in multi-agent systems.",
+  "rationale": "Triple-check run 1 of 3 for 7-agent AutoGen GroupChat stability."
+}
+

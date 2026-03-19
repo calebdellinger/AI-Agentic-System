@@ -21,3 +21,4 @@
 # n8n persistent storage
 **/.n8n/
 
+.aider*

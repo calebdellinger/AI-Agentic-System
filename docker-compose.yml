@@ -61,6 +61,14 @@ services:
       # Update VLLM_BASE_URL in .env to http://ollama:11434/v1 to use Ollama
       - VLLM_BASE_URL=${VLLM_BASE_URL:-http://ollama:11434/v1}
       - MODEL_NAME=${MODEL_NAME:-llama3.2:1b}
+      # Throttle policy model knobs (used when constraints.compute_tier
+      # requests/allow light vs heavy selection).
+      - LOCAL_LIGHT_MODEL_NAME=${LOCAL_LIGHT_MODEL_NAME:-${MODEL_NAME:-llama3.2:1b}}
+      - LOCAL_HEAVY_MODEL_NAME=${LOCAL_HEAVY_MODEL_NAME:-llama3.2:3b}
+      - AUTOGEN_TEMPERATURE_LIGHT=${AUTOGEN_TEMPERATURE_LIGHT:-0.2}
+      - AUTOGEN_TEMPERATURE_HEAVY=${AUTOGEN_TEMPERATURE_HEAVY:-0.1}
+      # How many attempts to allow on the light model before upgrading.
+      - LOCAL_MAX_LIGHT_ATTEMPTS=${LOCAL_MAX_LIGHT_ATTEMPTS:-1}
       - RHYTHM_STORAGE_ROOT=/rhythms
       - SPINALCORD_ROOT=/spinalcord
     volumes:
@@ -72,6 +80,18 @@ services:
     networks:
       - net_lab
       - net_llm
+
+  trinity-ui:
+    build:
+      context: .
+      dockerfile: trinity-ui/Dockerfile
+    container_name: trinity-ui
+    ports:
+      - "8501:8501"
+    volumes:
+      - spinalcord:/spinalcord
+    networks:
+      - net_internal
 
   n8n:
     image: n8nio/n8n:latest
