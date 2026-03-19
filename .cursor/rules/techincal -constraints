@@ -1,0 +1,8 @@
+---
+alwaysApply: true
+---
+
+## Technical Constraints
+- **Hardware**: Targeting an RTX 2060 (6GB VRAM). Optimize Python code for low-memory overhead.
+- **Docker**: All services run in a custom network `net_internal`. Use container names (e.g., `http://ollama:11434`) for internal API calls.
+- **Async First**: Use `asyncio` for all bridge/watcher services to prevent blocking the "Spinal Cord" loop.

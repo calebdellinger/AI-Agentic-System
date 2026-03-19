@@ -11,3 +11,8 @@ python-dotenv>=1.0
 # Agentic framework (used once we implement the debate/innovation loop)
 autogen
 
+# Rationale: AutoGen's OpenAIWrapper needs the `openai` module.
+# How: Install the required extra so the LOCAL OpenAI-compatible client works.
+# Contracts: Enables AutoGen to talk to vLLM/Ollama via OpenAI-compatible API.
+ag2[openai]
+

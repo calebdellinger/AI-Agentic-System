@@ -1,0 +1,8 @@
+---
+alwaysApply: true
+---
+
+## Architecture Rules
+- **Provider Isolation**: Local LLMs (Ollama) are the primary Tier-1 providers. Cloud (Gemini) is Tier-2 escalation only.
+- **The Spinal Cord**: All communication between hemispheres MUST happen via file-based JSON objects in the shared Docker volume `/spinalcord`.
+- **Schema First**: Use Pydantic models in `shared_schemas/` for all data structures. Never bypass these schemas.

@@ -1,0 +1,7 @@
+{
+  "schema_version": "0.1.0",
+  "correlation_id": "33333333-3333-3333-3333-333333333333",
+  "research_question": "Provide findings as plain JSON objects with keys exactly matching the ResearchDiscovery schema: claim, support_summary, confidence. Also output next_questions as a list of strings only.",
+  "rationale": "Debug run: determine why findings/next_questions schema validation fails in RD-Lab."
+}
+

@@ -1,0 +1,7 @@
+{
+  "schema_version": "0.1.0",
+  "correlation_id": "55555555-5555-5555-5555-555555555555",
+  "research_question": "Give 2 patterns for preventing schema drift when LLMs emit JSON across a file-based bridge.",
+  "rationale": "Second verification run after normalization fix; ensure we consistently produce schema-valid ResearchDiscovery."
+}
+

@@ -19,6 +19,38 @@ services:
     networks:
       - net_internal
 
+  # Rationale: Local LLM runner for Zenbook Pro Duo (6GB VRAM optimization).
+  # How: Uses official Ollama image with NVIDIA GPU passthrough.
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    networks:
+      - net_internal
+      - net_llm
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  vllm-server:
+    profiles: ["llm"]
+    image: vllm/vllm-openai:latest
+    container_name: vllm-server
+    environment:
+      - MODEL=${VLLM_MODEL:-meta-llama/Llama-3.2-3B-Instruct}
+    command: ["--model", "${VLLM_MODEL:-meta-llama/Llama-3.2-3B-Instruct}", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    networks:
+      - net_llm
+
   rd-lab-worker:
     build:
       context: .
@@ -26,13 +58,20 @@ services:
     container_name: rd-lab-worker
     environment:
       - PROVIDER_MODE=${PROVIDER_MODE:-LOCAL}
+      # Update VLLM_BASE_URL in .env to http://ollama:11434/v1 to use Ollama
+      - VLLM_BASE_URL=${VLLM_BASE_URL:-http://ollama:11434/v1}
+      - MODEL_NAME=${MODEL_NAME:-llama3.2:1b}
       - RHYTHM_STORAGE_ROOT=/rhythms
       - SPINALCORD_ROOT=/spinalcord
     volumes:
       - spinalcord:/spinalcord
       - lab_rhythms:/rhythms
+      # Debug mode: mount workspace so instrumentation can write
+      # `debug-ee17f7.log` back to the host for analysis.
+      - .:/workspace
     networks:
       - net_lab
+      - net_llm
 
   n8n:
     image: n8nio/n8n:latest
@@ -51,18 +90,15 @@ services:
     networks:
       - net_internal
 
-# NOTE: vLLM is expected to be provided separately as a sibling service/container
-# named `vllm-server` on the same Docker network(s) so `LOCAL` provider mode can
-# resolve `http://vllm-server:8000/v1`.
-
 volumes:
   spinalcord:
   trinity_rhythms:
   lab_rhythms:
   n8n_data:
+  ollama_data:
 
 networks:
   net_internal:
   net_lab:
     internal: true
-
+  net_llm:

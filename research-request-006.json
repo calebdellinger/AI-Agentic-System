@@ -1,0 +1,7 @@
+{
+  "schema_version": "0.1.0",
+  "correlation_id": "44444444-4444-4444-4444-444444444444",
+  "research_question": "When you normalize model output to a strict schema, preserve rationale and map adjacent structures deterministically.",
+  "rationale": "Debug run: normalization should convert adjacent JSON shapes into valid ResearchDiscovery."
+}
+
