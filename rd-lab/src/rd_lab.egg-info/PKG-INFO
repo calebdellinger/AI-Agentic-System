@@ -1,0 +1,6 @@
+Metadata-Version: 2.4
+Name: rd-lab
+Version: 0.1.0
+Summary: RD Lab hemisphere: AutoGen debate inside a DinD sandbox (air-gapped).
+Requires-Python: >=3.11
+Requires-Dist: pydantic>=2

@@ -1,0 +1,8 @@
+{
+  "schema_version": "1.0.0",
+  "company_slug": "your-company-slug",
+  "display_name": "Your Company Name",
+  "vertical": "your-vertical-label",
+  "specialization": "Short scope description",
+  "notes": "Copy from _template; do not commit secrets or unreleased bids here."
+}

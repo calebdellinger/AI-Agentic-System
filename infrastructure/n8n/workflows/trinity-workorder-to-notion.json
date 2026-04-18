@@ -1,12 +1,530 @@
 {
-  "name": "trinity-workorder-to-notion (scaffolding)",
-  "_rationale": "Rationale: n8n is the only external-action gateway. This workflow consumes Trinity WorkOrder JSON and executes Notion operations without hemispheres directly calling Notion.",
-  "_how": "How: Placeholder workflow spec. Implementation will map `operation` and `payload` fields from the WorkOrder schema to the appropriate Notion node actions.",
-  "_contracts": [
-    "Trinity posts WorkOrder to n8n webhook",
-    "n8n returns a WorkOrderResult payload",
-    "Secrets are stored in n8n local credentials (n8n_data volume)"
+  "name": "trinity-workorder-to-notion",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "trinity-workorder",
+        "responseMode": "responseNode"
+      },
+      "id": "webhook_in",
+      "name": "Webhook In",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -1040,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const input = $input.first().json || {};\nconst expectedSecret = $env.N8N_WORKORDER_WEBHOOK_SECRET || '';\n\nconst headers = input.headers || {};\nconst headerSecret =\n  headers['x-workorder-secret'] ||\n  headers['X-WorkOrder-Secret'] ||\n  headers['x_workorder_secret'] ||\n  '';\n\nconst workOrder = input.work_order_id ? input : (input.body || input);\nconst required = ['work_order_id', 'correlation_id', 'operation', 'idempotency_key'];\nconst missing = required.filter((k) => !workOrder[k]);\n\nif (expectedSecret && headerSecret !== expectedSecret) {\n  return [{\n    json: {\n      route: 'rejected',\n      ok: false,\n      status: 'rejected',\n      reason: 'invalid_webhook_secret',\n      received_utc: new Date().toISOString()\n    }\n  }];\n}\n\nif (missing.length > 0) {\n  return [{\n    json: {\n      route: 'rejected',\n      ok: false,\n      status: 'rejected',\n      reason: 'missing_required_fields',\n      missing_fields: missing,\n      received_utc: new Date().toISOString()\n    }\n  }];\n}\n\nconst store = getWorkflowStaticData('global');\nif (!store.idempotencySeen) {\n  store.idempotencySeen = {};\n}\nconst seen = store.idempotencySeen;\nconst key = String(workOrder.idempotency_key);\n\nif (seen[key]) {\n  return [{\n    json: {\n      route: 'duplicate',\n      ok: true,\n      status: 'duplicate_ignored',\n      work_order_id: String(workOrder.work_order_id),\n      correlation_id: String(workOrder.correlation_id),\n      operation: String(workOrder.operation),\n      idempotency_key: key,\n      first_seen_utc: seen[key].first_seen_utc,\n      received_utc: new Date().toISOString()\n    }\n  }];\n}\n\nseen[key] = {\n  first_seen_utc: new Date().toISOString(),\n  work_order_id: String(workOrder.work_order_id),\n  operation: String(workOrder.operation)\n};\n\nreturn [{\n  json: {\n    route: String(workOrder.operation || 'unsupported'),\n    work_order: workOrder,\n    work_order_id: String(workOrder.work_order_id),\n    correlation_id: String(workOrder.correlation_id),\n    operation: String(workOrder.operation || 'unsupported'),\n    idempotency_key: key,\n    decision_dna_ref: workOrder.decision_dna_ref || null,\n    received_utc: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "validate_and_route",
+      "name": "Validate + Idempotency Guard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -800,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "dataType": "string",
+        "value1": "={{$json.route}}",
+        "rules": [
+          {
+            "operation": "equal",
+            "value2": "rejected"
+          },
+          {
+            "operation": "equal",
+            "value2": "duplicate"
+          },
+          {
+            "operation": "equal",
+            "value2": "notion_create"
+          },
+          {
+            "operation": "equal",
+            "value2": "notion_update"
+          },
+          {
+            "operation": "equal",
+            "value2": "noop"
+          }
+        ],
+        "fallbackOutput": 6
+      },
+      "id": "route_switch",
+      "name": "Route by Operation",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [
+        -560,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const p = $json.work_order?.payload || {};\nconst databaseId = p.database_id || $env.NOTION_DATABASE_ID || '';\nif (!databaseId) {\n  throw new Error('Missing database_id in payload and NOTION_DATABASE_ID env var.');\n}\n\nconst properties = p.properties || {};\nconst children = Array.isArray(p.children) ? p.children : [];\n\nreturn [{\n  json: {\n    ...$json,\n    notion_request_body: {\n      parent: { database_id: databaseId },\n      properties,\n      children\n    }\n  }\n}];"
+      },
+      "id": "prepare_notion_create",
+      "name": "Prepare Notion Create Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -320,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.notion.com/v1/pages",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$env.NOTION_API_TOKEN}}"
+            },
+            {
+              "name": "Notion-Version",
+              "value": "={{$env.NOTION_API_VERSION || '2022-06-28'}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{$json.notion_request_body}}"
+      },
+      "id": "notion_create_http",
+      "name": "Notion Create Page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -80,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const response = $input.first().json || {};\nconst work = $('Prepare Notion Create Request').first().json;\n\nreturn [{\n  json: {\n    ok: true,\n    status: 'completed',\n    operation: work.operation,\n    work_order_id: work.work_order_id,\n    correlation_id: work.correlation_id,\n    idempotency_key: work.idempotency_key,\n    decision_dna_ref: work.decision_dna_ref,\n    received_utc: work.received_utc,\n    completed_utc: new Date().toISOString(),\n    notion: {\n      action: 'create_page',\n      page_id: response.id || null,\n      url: response.url || null\n    }\n  }\n}];"
+      },
+      "id": "format_notion_create_result",
+      "name": "Format Notion Create Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        160,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const p = $json.work_order?.payload || {};\nconst pageId = p.page_id || '';\nif (!pageId) {\n  throw new Error('Missing payload.page_id for notion_update operation.');\n}\n\nconst body = {};\nif (p.properties && typeof p.properties === 'object') body.properties = p.properties;\nif (typeof p.archived === 'boolean') body.archived = p.archived;\nif (p.icon) body.icon = p.icon;\nif (p.cover) body.cover = p.cover;\n\nreturn [{\n  json: {\n    ...$json,\n    notion_page_id: pageId,\n    notion_request_body: body\n  }\n}];"
+      },
+      "id": "prepare_notion_update",
+      "name": "Prepare Notion Update Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -320,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.notion.com/v1/pages/{{$json.notion_page_id}}",
+        "method": "PATCH",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$env.NOTION_API_TOKEN}}"
+            },
+            {
+              "name": "Notion-Version",
+              "value": "={{$env.NOTION_API_VERSION || '2022-06-28'}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{$json.notion_request_body}}"
+      },
+      "id": "notion_update_http",
+      "name": "Notion Update Page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -80,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const response = $input.first().json || {};\nconst work = $('Prepare Notion Update Request').first().json;\n\nreturn [{\n  json: {\n    ok: true,\n    status: 'completed',\n    operation: work.operation,\n    work_order_id: work.work_order_id,\n    correlation_id: work.correlation_id,\n    idempotency_key: work.idempotency_key,\n    decision_dna_ref: work.decision_dna_ref,\n    received_utc: work.received_utc,\n    completed_utc: new Date().toISOString(),\n    notion: {\n      action: 'update_page',\n      page_id: response.id || work.notion_page_id || null,\n      url: response.url || null\n    }\n  }\n}];"
+      },
+      "id": "format_notion_update_result",
+      "name": "Format Notion Update Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        160,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "keepOnlySet": true,
+        "values": {
+          "boolean": [
+            {
+              "name": "ok",
+              "value": false
+            }
+          ],
+          "string": [
+            {
+              "name": "status",
+              "value": "rejected"
+            },
+            {
+              "name": "reason",
+              "value": "={{$json.reason || 'rejected_by_validation'}}"
+            }
+          ]
+        }
+      },
+      "id": "response_rejected",
+      "name": "Build Rejected Response",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -320,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "keepOnlySet": true,
+        "values": {
+          "boolean": [
+            {
+              "name": "ok",
+              "value": true
+            }
+          ],
+          "string": [
+            {
+              "name": "status",
+              "value": "duplicate_ignored"
+            },
+            {
+              "name": "work_order_id",
+              "value": "={{$json.work_order_id || ''}}"
+            },
+            {
+              "name": "idempotency_key",
+              "value": "={{$json.idempotency_key || ''}}"
+            }
+          ]
+        }
+      },
+      "id": "response_duplicate",
+      "name": "Build Duplicate Response",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -320,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "keepOnlySet": true,
+        "values": {
+          "boolean": [
+            {
+              "name": "ok",
+              "value": true
+            }
+          ],
+          "string": [
+            {
+              "name": "status",
+              "value": "noop_acknowledged"
+            },
+            {
+              "name": "operation",
+              "value": "noop"
+            },
+            {
+              "name": "work_order_id",
+              "value": "={{$json.work_order_id || ''}}"
+            }
+          ]
+        }
+      },
+      "id": "response_noop",
+      "name": "Build Noop Response",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -320,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "keepOnlySet": true,
+        "values": {
+          "boolean": [
+            {
+              "name": "ok",
+              "value": false
+            }
+          ],
+          "string": [
+            {
+              "name": "status",
+              "value": "unsupported_operation"
+            },
+            {
+              "name": "operation",
+              "value": "={{$json.operation || $json.route || 'unknown'}}"
+            }
+          ]
+        }
+      },
+      "id": "response_unsupported",
+      "name": "Build Unsupported Response",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -320,
+        780
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{$json}}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "respond_json",
+      "name": "Respond JSON",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        420,
+        420
+      ]
+    }
   ],
-  "scaffold_only": true
+  "connections": {
+    "Webhook In": {
+      "main": [
+        [
+          {
+            "node": "Validate + Idempotency Guard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate + Idempotency Guard": {
+      "main": [
+        [
+          {
+            "node": "Route by Operation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by Operation": {
+      "main": [
+        [
+          {
+            "node": "Build Rejected Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Duplicate Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Notion Create Request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Notion Update Request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Noop Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Unsupported Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Notion Create Request": {
+      "main": [
+        [
+          {
+            "node": "Notion Create Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notion Create Page": {
+      "main": [
+        [
+          {
+            "node": "Format Notion Create Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Notion Update Request": {
+      "main": [
+        [
+          {
+            "node": "Notion Update Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notion Update Page": {
+      "main": [
+        [
+          {
+            "node": "Format Notion Update Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Rejected Response": {
+      "main": [
+        [
+          {
+            "node": "Respond JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Duplicate Response": {
+      "main": [
+        [
+          {
+            "node": "Respond JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Noop Response": {
+      "main": [
+        [
+          {
+            "node": "Respond JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Unsupported Response": {
+      "main": [
+        [
+          {
+            "node": "Respond JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Notion Create Result": {
+      "main": [
+        [
+          {
+            "node": "Respond JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Notion Update Result": {
+      "main": [
+        [
+          {
+            "node": "Respond JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {}
 }
 

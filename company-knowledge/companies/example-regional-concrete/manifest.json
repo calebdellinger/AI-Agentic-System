@@ -1,0 +1,8 @@
+{
+  "schema_version": "1.0.0",
+  "company_slug": "example-regional-concrete",
+  "display_name": "Example Regional Concrete LLC",
+  "vertical": "construction",
+  "specialization": "Commercial cast-in-place concrete subcontracting (example tenant only)",
+  "notes": "Fictional company for demos and tests. Replace this folder to plug in another organization."
+}

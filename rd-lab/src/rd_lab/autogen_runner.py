@@ -25,6 +25,7 @@ from rd_lab.autogen_research import run_autogen_with_pydantic_retries, write_val
 from rd_lab.bridge.inbox import iter_request_files
 from rd_lab.storage.log_writer import append_rhythm_event
 from rd_lab.models.research_request import ResearchRequest
+from shared.company_knowledge.paths import summarize_knowledge_mount
 
 
 def _spinalcord_subdirs(spinalcord_root: str) -> dict[str, Path]:
@@ -53,6 +54,15 @@ def main() -> None:
         hemisphere="lab",
         event_type="#INFO",
         payload={"msg": "RD Lab scaffold started"},
+    )
+    append_rhythm_event(
+        rhythms_root=rhythms_root,
+        hemisphere="lab",
+        event_type="#INFO",
+        payload={
+            "msg": "Company knowledge mount (shared with Trinity)",
+            **summarize_knowledge_mount(),
+        },
     )
 
     while True:

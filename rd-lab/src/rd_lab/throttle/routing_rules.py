@@ -55,6 +55,43 @@ def _norm(s: str) -> str:
     return (s or "").strip().lower()
 
 
+def explicit_compute_tier(constraints: dict[str, Any]) -> str | None:
+    """
+    Returns normalized `compute_tier` when explicitly set on the request.
+
+    Values: auto | light | heavy | cloud
+    """
+
+    explicit = constraints.get("compute_tier")
+    if isinstance(explicit, str):
+        n = explicit.strip().lower()
+        if n in {"auto", "light", "heavy", "cloud", ""}:
+            return "auto" if n in {"", "auto"} else n
+    return None
+
+
+def is_cloud_first(*, constraints: dict[str, Any]) -> bool:
+    return explicit_compute_tier(constraints) == "cloud"
+
+
+def is_cloud_escalation_allowed(*, constraints: dict[str, Any]) -> bool:
+    """
+    Per-request opt-out for sovereign / air-gapped runs.
+
+    - When false: AutoGen must use the **local** OpenAI-compatible URL only
+      (`VLLM_BASE_URL`), even if `PROVIDER_MODE=GEMINI` or `compute_tier=cloud`.
+    - Default: remote OpenAI-compatible endpoints (e.g. Gemini) are allowed
+      when the process is configured for them.
+    """
+
+    v = constraints.get("allow_cloud_escalation")
+    if v is False:
+        return False
+    if isinstance(v, str) and v.strip().lower() in {"0", "false", "no", "off"}:
+        return False
+    return True
+
+
 def compute_initial_tier(*, research_question: str, constraints: dict[str, Any]) -> str:
     """
     Returns "light" or "heavy".
@@ -69,8 +106,10 @@ def compute_initial_tier(*, research_question: str, constraints: dict[str, Any])
         explicit_norm = explicit.strip().lower()
         if explicit_norm in {"light", "heavy"}:
             return explicit_norm
-        # "auto" (or anything else) means defer to heuristics.
-        if explicit_norm in {"auto", ""}:
+        # "auto", "cloud", empty → defer to heuristics for *local* routing.
+        # (`cloud` is handled earlier by cloud-first path; if cloud is disabled,
+        # falling through here matches "auto".)
+        if explicit_norm in {"auto", "", "cloud"}:
             pass
 
     q = _norm(research_question)

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local/company-knowledge/manifest.schema.json",
+  "title": "CompanyKnowledgeManifest",
+  "type": "object",
+  "required": ["schema_version", "company_slug", "display_name"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Manifest format version"
+    },
+    "company_slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+      "description": "Directory name under companies/"
+    },
+    "display_name": { "type": "string", "minLength": 1 },
+    "vertical": {
+      "type": "string",
+      "description": "Loose industry label for humans (not used for branching code paths)"
+    },
+    "specialization": {
+      "type": "string",
+      "description": "Free-text scope; sample content only"
+    },
+    "notes": { "type": "string" }
+  },
+  "additionalProperties": true
+}

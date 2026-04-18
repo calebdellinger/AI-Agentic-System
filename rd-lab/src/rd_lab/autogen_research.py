@@ -2,9 +2,14 @@
 Rationale: Encapsulate the AutoGen debate loop for generating
 `ResearchDiscovery` artifacts.
 
-How (Phase 2 - AutoGen only):
+How (Phase 2 - AutoGen):
 - Consumes a validated `ResearchRequest`.
-- Runs a local-only AutoGen debate to produce a JSON payload.
+- Runs the multi-agent AutoGen debate (specialists + synthesizer) using an
+  OpenAI-compatible Chat Completions backend — local Ollama/vLLM, Gemini's
+  OpenAI-compatible endpoint, or any provider URL + key you set in env.
+- Default configuration targets **Gemini** (cloud); `GroupChat` runs when the
+  backend is remote. Local vLLM/Ollama uses sequential chats unless
+  `AUTOGEN_ENABLE_GROUPCHAT_LOCAL=true` (for larger on-prem models).
 - Parses the payload and validates it using shared Pydantic schemas.
 - Retries validation up to 3 times before signaling an error artifact.
 
@@ -14,14 +19,13 @@ Contracts:
   - `#DECISION_RATIONALE_WRITTEN` before debate starts (using request rationale)
   - `#SYSTEM_VALIDATION_FAILURE` per failed validation attempt
 - On success, writes `ResearchDiscovery` via outbox.
-- On repeated validation failure, writes an error artifact and stops (no
-  escalation from Lab; orchestrator may escalate later).
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, Optional
 from pathlib import Path
@@ -30,13 +34,167 @@ import time
 from shared_schemas.config import get_provider_settings
 from shared_schemas.research_discovery import ResearchDiscovery
 
+from rd_lab.bridge.debate_transcript import (
+    debate_transcript_append_turn,
+    debate_transcript_begin,
+)
 from rd_lab.bridge.outbox import write_research_discovery
 from rd_lab.models.research_request import ResearchRequest
 from rd_lab.storage.log_writer import append_rhythm_event
-from rd_lab.throttle.routing_rules import compute_initial_tier, should_upgrade_to_heavy
+from rd_lab.throttle.openai_compat import resolve_autogen_openai_config, should_use_remote_openai_compat
+from rd_lab.throttle.routing_rules import (
+    compute_initial_tier,
+    explicit_compute_tier,
+    should_upgrade_to_heavy,
+)
+from shared.company_knowledge.paths import active_company_slug, iter_document_files_sorted
 
 
 MAX_VALIDATION_ATTEMPTS = 3
+KNOWLEDGE_DEFAULT_TOP_K = 3
+KNOWLEDGE_DEFAULT_MAX_CHARS = 1800
+KNOWLEDGE_MAX_DOC_CHARS = 1200
+
+
+def _env_truthy(name: str, *, default: bool = False) -> bool:
+    v = (os.getenv(name) or "").strip().lower()
+    if v in {"1", "true", "yes", "on"}:
+        return True
+    if v in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _use_groupchat_debate(*, remote: bool) -> bool:
+    """
+    Rationale: Prototype on cloud (Gemini): GroupChat is default whenever the
+    resolved backend is remote. Local loopback defaults to sequential chats
+    (small models stall in GroupChat); set AUTOGEN_ENABLE_GROUPCHAT_LOCAL=true
+    when local hardware runs a large enough model.
+    """
+
+    if remote:
+        return True
+    return _env_truthy("AUTOGEN_ENABLE_GROUPCHAT_LOCAL", default=False)
+
+
+def _constraint_bool(constraints: dict[str, Any], key: str, *, default: bool = False) -> bool:
+    value = constraints.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        val = value.strip().lower()
+        if val in {"1", "true", "yes", "on"}:
+            return True
+        if val in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def _constraint_int(
+    constraints: dict[str, Any],
+    key: str,
+    *,
+    default: int,
+    min_value: int,
+    max_value: int,
+) -> int:
+    value = constraints.get(key, default)
+    try:
+        parsed = int(value)
+    except Exception:
+        return default
+    return max(min_value, min(parsed, max_value))
+
+
+def _tokenize_query(text: str) -> set[str]:
+    return {tok for tok in re.findall(r"[a-z0-9]{3,}", text.lower())}
+
+
+def _read_doc_snippet(path: Path, *, max_chars: int) -> str:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except Exception:
+        return ""
+    compact = re.sub(r"\s+", " ", raw).strip()
+    if not compact:
+        return ""
+    return compact[:max_chars].strip()
+
+
+def _build_company_knowledge_context(request: ResearchRequest) -> tuple[str, list[str]]:
+    """
+    Rationale: Optional retrieval grounds responses in tenant-specific docs.
+
+    How:
+    - When `constraints.use_company_knowledge=true`, select top matching docs
+      by simple lexical overlap and inject compact snippets into prompt context.
+
+    Contracts:
+    - No vector backend required.
+    - Prompt budget is bounded by `knowledge_max_chars`.
+    """
+
+    constraints = request.constraints or {}
+    enabled = _constraint_bool(constraints, "use_company_knowledge", default=False)
+    if not enabled:
+        return "", []
+
+    top_k = _constraint_int(
+        constraints,
+        "knowledge_top_k",
+        default=KNOWLEDGE_DEFAULT_TOP_K,
+        min_value=1,
+        max_value=8,
+    )
+    max_chars = _constraint_int(
+        constraints,
+        "knowledge_max_chars",
+        default=KNOWLEDGE_DEFAULT_MAX_CHARS,
+        min_value=600,
+        max_value=6000,
+    )
+
+    query_terms = _tokenize_query(request.research_question)
+    candidates: list[tuple[int, Path, str]] = []
+    for path in iter_document_files_sorted():
+        snippet = _read_doc_snippet(path, max_chars=KNOWLEDGE_MAX_DOC_CHARS)
+        if not snippet:
+            continue
+        haystack = f"{path.name} {snippet}".lower()
+        score = sum(1 for term in query_terms if term in haystack)
+        candidates.append((score, path, snippet))
+
+    if not candidates:
+        return "", []
+
+    ranked = sorted(
+        candidates,
+        key=lambda x: (x[0], x[1].stat().st_mtime, -len(x[2])),
+        reverse=True,
+    )
+    selected = ranked[:top_k]
+
+    # If every score is zero, still provide first `top_k` snippets as broad context.
+    if all(score == 0 for score, _p, _s in selected):
+        selected = ranked[:top_k]
+
+    lines = [f"Company knowledge snippets for `{active_company_slug()}`:"]
+    used_sources: list[str] = []
+    used_chars = len(lines[0])
+    for _score, path, snippet in selected:
+        rel = str(path)
+        block = f"- Source: {rel}\n  Snippet: {snippet}"
+        if used_chars + len(block) > max_chars:
+            break
+        lines.append(block)
+        used_sources.append(rel)
+        used_chars += len(block)
+
+    if len(lines) == 1:
+        return "", []
+    return "\n".join(lines), used_sources
+
 
 # Debug mode runtime evidence.
 #
@@ -312,38 +470,29 @@ def _parse_discovery_from_autogen_text(text: str, *, request: ResearchRequest) -
     return ResearchDiscovery.model_validate(normalized)
 
 
-def _build_llm_config_for_autogen(*, model: str, temperature: float) -> dict[str, Any]:
+def _build_llm_config_for_autogen(
+    *,
+    request: ResearchRequest,
+    model: str,
+    temperature: float,
+) -> dict[str, Any]:
     """
-    Rationale: Bridge shared provider config into AutoGen's LLM config.
+    Rationale: AutoGen agents always use an OpenAI-compatible Chat Completions API.
 
     How:
-    - Uses vLLM via OpenAI-compatible base URL when `PROVIDER_MODE=LOCAL`.
+    - Local: `VLLM_BASE_URL` (Ollama, vLLM, etc.).
+    - Remote: Gemini OpenAI compat URL + `GOOGLE_API_KEY`, or
+      `AUTOGEN_OPENAI_BASE_URL` + `AUTOGEN_OPENAI_API_KEY` for any compatible provider.
 
     Contracts:
-    - Supports scaffolding for LOCAL mode.
-  """
+    - `constraints.allow_cloud_escalation: false` forces local base URL only.
+    """
 
-    settings = get_provider_settings()
-    if settings.provider_mode != "LOCAL":
-        raise ValueError(
-            "rd-lab debate loop currently assumes LOCAL provider mode (OpenAI-compatible endpoint). "
-            f"Got {settings.provider_mode!r}."
-        )
-
-    # Rationale: AutoGen's ConversableAgent expects OpenAI-compatible config_list.
-    return {
-        "config_list": [
-            {
-                "model": model,
-                "base_url": settings.vllm_base_url,
-                "api_key": "local",
-            }
-        ],
-        "temperature": float(temperature),
-        # Rationale: Prevent indefinitely blocked calls on local runtimes.
-        # How: Force agent turns to fail-fast so queue processing can continue.
-        "timeout": int(os.getenv("AUTOGEN_REQUEST_TIMEOUT_SECONDS", "45")),
-    }
+    return resolve_autogen_openai_config(
+        model=model,
+        temperature=temperature,
+        constraints=request.constraints,
+    )
 
 
 def _extract_chat_last_content(chat_result: Any) -> str:
@@ -376,28 +525,80 @@ def _extract_chat_last_content(chat_result: Any) -> str:
     raise ValueError("Unable to extract model output from AutoGen result")
 
 
-def _run_autogen_research_json(*, request: ResearchRequest, model: str, temperature: float) -> str:
+def _append_transcript_from_groupchat_history(
+    *,
+    spinalcord_root: str,
+    correlation_id: str,
+    chat_history: list[Any],
+) -> None:
     """
-    Rationale: AutoGen debate loop should return candidate discovery JSON.
+    Rationale: Mirror sequential path by logging specialist + synthesizer turns.
 
-    How:
-    - Uses six specialized debate agents plus one orchestrator proxy in a
-      GroupChat:
-      `oracle`, `disruptor`, `alchemist`, `visionary`, `contrarian`,
-      `synthesizer`, and `user_proxy`.
-    - The `synthesizer` is responsible for final JSON output aligned to
-      `ResearchDiscovery`.
-
-    Contracts:
-    - All agents are configured with `code_execution_config=False` so the
-      debate does not execute code.
-    - Output must be JSON-only; we read the final synthesizer content.
+    How: Only append named agent messages (skip user_proxy / system noise).
     """
 
-    # Local import so scaffolding doesn't break if autogen changes.
+    logged: set[tuple[str, str]] = set()
+    for msg in chat_history:
+        if not isinstance(msg, dict):
+            continue
+        name = msg.get("name")
+        content = msg.get("content")
+        if not isinstance(name, str) or name == "user_proxy":
+            continue
+        if not isinstance(content, str) or not content.strip():
+            continue
+        if name not in {"oracle", "disruptor", "alchemist", "visionary", "contrarian", "synthesizer"}:
+            continue
+        key = (name, content[:2000])
+        if key in logged:
+            continue
+        logged.add(key)
+        extra: dict[str, Any] = {}
+        if name == "synthesizer":
+            extra["phase"] = "research_discovery_json_candidate"
+        debate_transcript_append_turn(
+            spinalcord_root=spinalcord_root,
+            correlation_id=correlation_id,
+            agent=name,
+            content=content,
+            extra=extra or None,
+        )
+
+
+def _extract_synthesizer_last_from_groupchat_history(chat_history: list[Any]) -> str:
+    """
+    Rationale: Final JSON must come from the synthesizer agent in GroupChat.
+
+    How: Last non-empty message whose `name` is `synthesizer`.
+    """
+
+    last: Optional[str] = None
+    for msg in chat_history:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("name") != "synthesizer":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str) and content.strip():
+            last = content
+    if last:
+        return last
+    raise ValueError("No synthesizer message found in group chat history")
+
+
+def _build_debate_agents(
+    *,
+    llm_config: dict[str, Any],
+    user_proxy_max_consecutive_auto_reply: int,
+) -> tuple[Any, Any, Any, Any, Any, Any, Any]:
+    """
+    Rationale: Single construction site for AssistantAgents + UserProxyAgent.
+
+    Returns:
+        (user_proxy, oracle, disruptor, alchemist, visionary, contrarian, synthesizer)
+    """
+
     from autogen import AssistantAgent, UserProxyAgent
-
-    llm_config = _build_llm_config_for_autogen(model=model, temperature=temperature)
 
     oracle = AssistantAgent(
         name="oracle",
@@ -468,9 +669,57 @@ def _run_autogen_research_json(*, request: ResearchRequest, model: str, temperat
     user_proxy = UserProxyAgent(
         name="user_proxy",
         human_input_mode="NEVER",
-        max_consecutive_auto_reply=10,
+        max_consecutive_auto_reply=user_proxy_max_consecutive_auto_reply,
         is_termination_msg=lambda x: "discovery_id" in x.get("content", "").lower(),
         code_execution_config=False,
+    )
+
+    return (
+        user_proxy,
+        oracle,
+        disruptor,
+        alchemist,
+        visionary,
+        contrarian,
+        synthesizer,
+    )
+
+
+def _run_autogen_research_json(
+    *,
+    request: ResearchRequest,
+    model: str,
+    temperature: float,
+    spinalcord_root: str,
+    attempt: int,
+) -> str:
+    """
+    Rationale: AutoGen debate loop should return candidate discovery JSON.
+
+    How:
+    - When `GroupChat` is selected (cloud by default, or local + env — see
+      `_use_groupchat_debate`): round-robin multi-agent debate.
+    - Otherwise (local default): deterministic one-turn-per-specialist
+      orchestration until `AUTOGEN_ENABLE_GROUPCHAT_LOCAL=true`.
+
+    Contracts:
+    - All agents are configured with `code_execution_config=False` so the
+      debate does not execute code.
+    - Output must be JSON-only; we read the final synthesizer content.
+    """
+
+    llm_config = _build_llm_config_for_autogen(
+        request=request,
+        model=model,
+        temperature=temperature,
+    )
+
+    remote = should_use_remote_openai_compat(constraints=request.constraints)
+    use_groupchat = _use_groupchat_debate(remote=remote)
+    grp_ua_max = int(os.getenv("AUTOGEN_GROUPCHAT_USER_PROXY_MAX_REPLY", "18"))
+    user_proxy, oracle, disruptor, alchemist, visionary, contrarian, synthesizer = _build_debate_agents(
+        llm_config=llm_config,
+        user_proxy_max_consecutive_auto_reply=grp_ua_max if use_groupchat else 10,
     )
 
     discovery_prompt = {
@@ -481,6 +730,18 @@ def _run_autogen_research_json(*, request: ResearchRequest, model: str, temperat
         if request.linked_decision_record_id
         else None,
     }
+    knowledge_context, knowledge_sources = _build_company_knowledge_context(request)
+    if knowledge_context:
+        discovery_prompt["company_knowledge_context"] = knowledge_context
+        discovery_prompt["company_knowledge_sources"] = knowledge_sources
+
+    debate_transcript_begin(
+        spinalcord_root=spinalcord_root,
+        request_id=str(request.request_id),
+        correlation_id=str(request.correlation_id),
+        research_question=request.research_question,
+        attempt=attempt,
+    )
 
     # Rationale: Provide an explicit schema-shaped template to reduce
     # hallucinated key names and wrong nested types.
@@ -505,12 +766,81 @@ def _run_autogen_research_json(*, request: ResearchRequest, model: str, temperat
         "artifact_refs": [],
     }
 
-    # Rationale: GroupChat with small local models can stall and never emit a
-    # terminal state. Deterministic one-turn-per-specialist orchestration keeps
-    # the 7-agent design while guaranteeing completion.
+    if use_groupchat:
+        # Cloud (default) or local + AUTOGEN_ENABLE_GROUPCHAT_LOCAL=true.
+        from autogen import GroupChat, GroupChatManager
+
+        # Caps (tune via env; smoke tests set minimal values — see scripts/test_groupchat_smoke.py).
+        max_round = int(os.getenv("AUTOGEN_GROUPCHAT_MAX_ROUNDS", "20"))
+        max_retries_sel = int(os.getenv("AUTOGEN_GROUPCHAT_MAX_RETRIES_SELECT_SPEAKER", "2"))
+        groupchat = GroupChat(
+            agents=[
+                user_proxy,
+                oracle,
+                disruptor,
+                alchemist,
+                visionary,
+                contrarian,
+                synthesizer,
+            ],
+            messages=[],
+            max_round=max_round,
+            speaker_selection_method="round_robin",
+            allow_repeat_speaker=False,
+            max_retries_for_selecting_speaker=max_retries_sel,
+        )
+        manager = GroupChatManager(groupchat=groupchat, llm_config=llm_config)
+        knowledge_clause = ""
+        if knowledge_context:
+            knowledge_clause = (
+                f"Company knowledge context:\n{knowledge_context}\n\n"
+                "Use the provided company knowledge only as supporting context when relevant; "
+                "do not invent citations.\n\n"
+            )
+        initial_message = (
+            "Multi-agent research debate. Order (one contribution each, then synthesizer): "
+            "oracle → disruptor → alchemist → visionary → contrarian → synthesizer.\n\n"
+            f"Request: {json.dumps(discovery_prompt, ensure_ascii=False)}\n\n"
+            f"Schema template (synthesizer output must match this shape): "
+            f"{json.dumps(schema_template, ensure_ascii=False)}\n\n"
+            f"{knowledge_clause}"
+            "Specialists: concise, respond to prior messages when relevant. "
+            "Synthesizer: output ONLY valid ResearchDiscovery JSON (no markdown)."
+        )
+        initiate_max = (os.getenv("AUTOGEN_GROUPCHAT_INITIATE_MAX_TURNS") or "").strip()
+        chat_kw: dict[str, Any] = {"message": initial_message, "silent": True}
+        if initiate_max.isdigit():
+            chat_kw["max_turns"] = int(initiate_max)
+        chat_result = user_proxy.initiate_chat(manager, **chat_kw)
+        history = getattr(chat_result, "chat_history", None)
+        if isinstance(history, list) and history:
+            _append_transcript_from_groupchat_history(
+                spinalcord_root=spinalcord_root,
+                correlation_id=str(request.correlation_id),
+                chat_history=history,
+            )
+            final_text = _extract_synthesizer_last_from_groupchat_history(history)
+        else:
+            final_text = _extract_chat_last_content(chat_result)
+            debate_transcript_append_turn(
+                spinalcord_root=spinalcord_root,
+                correlation_id=str(request.correlation_id),
+                agent="synthesizer",
+                content=final_text,
+                extra={"phase": "research_discovery_json_candidate"},
+            )
+        return final_text
+
+    # Local loopback: deterministic one-turn-per-specialist orchestration.
+    debate_knowledge_clause = (
+        f"\nCompany knowledge context:\n{knowledge_context}\n"
+        if knowledge_context
+        else ""
+    )
     debate_prompt = (
         "Provide concise specialist input for this request.\n\n"
         f"Request: {json.dumps(discovery_prompt, ensure_ascii=False)}\n"
+        f"{debate_knowledge_clause}"
         "Return plain text bullets only."
     )
 
@@ -524,11 +854,23 @@ def _run_autogen_research_json(*, request: ResearchRequest, model: str, temperat
         )
         text = _extract_chat_last_content(result)
         specialist_notes.append(f"{specialist.name}: {text}")
+        debate_transcript_append_turn(
+            spinalcord_root=spinalcord_root,
+            correlation_id=str(request.correlation_id),
+            agent=specialist.name,
+            content=text,
+        )
 
+    synthesis_knowledge_clause = (
+        f"Company knowledge context:\n{knowledge_context}\n\n"
+        if knowledge_context
+        else ""
+    )
     synthesis_prompt = (
         "You are finalizing the debate into one strict ResearchDiscovery JSON object.\n\n"
         f"Request JSON: {json.dumps(discovery_prompt, ensure_ascii=False)}\n"
         f"Schema Template: {json.dumps(schema_template, ensure_ascii=False)}\n\n"
+        f"{synthesis_knowledge_clause}"
         "Specialist Notes:\n"
         + "\n\n".join(specialist_notes)
         + "\n\nOutput constraints:\n"
@@ -545,7 +887,47 @@ def _run_autogen_research_json(*, request: ResearchRequest, model: str, temperat
         max_turns=1,
         silent=True,
     )
-    return _extract_chat_last_content(synth_result)
+    final_text = _extract_chat_last_content(synth_result)
+    debate_transcript_append_turn(
+        spinalcord_root=spinalcord_root,
+        correlation_id=str(request.correlation_id),
+        agent="synthesizer",
+        content=final_text,
+        extra={"phase": "research_discovery_json_candidate"},
+    )
+    return final_text
+
+
+def _parse_write_discovery(
+    *,
+    request: ResearchRequest,
+    spinalcord_root: str,
+    candidate_text: str,
+) -> tuple[bool, Optional[ResearchDiscovery], Optional[dict[str, Any]]]:
+    """
+    Rationale: Single place to parse model text, validate correlation_id,
+    and persist a `ResearchDiscovery`.
+    """
+
+    try:
+        discovery = _parse_discovery_from_autogen_text(candidate_text, request=request)
+        if discovery.correlation_id != request.correlation_id:
+            raise ValueError(
+                f"correlation_id mismatch: discovery={discovery.correlation_id}, request={request.correlation_id}"
+            )
+        write_research_discovery(spinalcord_root, discovery)
+        return True, discovery, None
+    except Exception as e:  # noqa: BLE001
+        err: dict[str, Any] = {
+            "error_type": type(e).__name__,
+            "error_message": str(e),
+        }
+        try:
+            if hasattr(e, "errors"):
+                err["pydantic_errors"] = [d.get("loc", None) for d in e.errors()]  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        return False, None, err
 
 
 @dataclass(frozen=True)
@@ -565,9 +947,11 @@ def run_autogen_with_pydantic_retries(
     Rationale: Validation failure must be observable and deterministic.
 
     How:
-    - Attempt AutoGen -> parse -> validate up to MAX_VALIDATION_ATTEMPTS.
-    - Log a rhythm event for each validation failure.
-    - If still failing, return outcome with an error summary for error artifact.
+    - Run the same multi-agent AutoGen loop for every backend; only the
+      OpenAI-compatible `base_url` / `api_key` / `model` change (see
+      `throttle/openai_compat.py`).
+    - Apply light/heavy model aliases (local vs cloud defaults).
+    - Parse/validate up to MAX_VALIDATION_ATTEMPTS.
     """
 
     # Log rationale before any LLM debate (your Decision DNA rule).
@@ -585,9 +969,16 @@ def run_autogen_with_pydantic_retries(
         record_id=request.linked_decision_record_id,
     )
 
-    # Model selection / throttle knobs.
-    light_model = os.getenv("LOCAL_LIGHT_MODEL_NAME") or os.getenv("MODEL_NAME") or "llama3.2:1b"
-    heavy_model = os.getenv("LOCAL_HEAVY_MODEL_NAME") or "llama3.2:3b"
+    remote = should_use_remote_openai_compat(constraints=request.constraints)
+    if remote:
+        # Rationale: Do not fall back to LOCAL_* or generic MODEL_NAME — those are
+        # often Ollama IDs and break Gemini OpenAI-compat (404 on `models/llama...`).
+        # Defaults: 2.5 Flash family only (no Pro) for cost/latency; override via CLOUD_*.
+        light_model = os.getenv("CLOUD_LIGHT_MODEL_NAME") or "gemini-2.5-flash-lite"
+        heavy_model = os.getenv("CLOUD_HEAVY_MODEL_NAME") or "gemini-2.5-flash"
+    else:
+        light_model = os.getenv("LOCAL_LIGHT_MODEL_NAME") or os.getenv("MODEL_NAME") or "llama3.2:1b"
+        heavy_model = os.getenv("LOCAL_HEAVY_MODEL_NAME") or "llama3.2:3b"
     light_temp = float(os.getenv("AUTOGEN_TEMPERATURE_LIGHT", "0.2"))
     heavy_temp = float(os.getenv("AUTOGEN_TEMPERATURE_HEAVY", "0.1"))
 
@@ -603,10 +994,12 @@ def run_autogen_with_pydantic_retries(
         message="Starting AutoGen debate run with throttle policy.",
         data={
             "provider_mode": provider_settings.provider_mode,
+            "openai_compat_remote": remote,
             "vllm_base_url": provider_settings.vllm_base_url,
             "light_model": light_model,
             "heavy_model": heavy_model,
             "initial_tier": initial_tier,
+            "explicit_compute_tier": explicit_compute_tier(request.constraints),
             "request_constraints": request.constraints,
             "max_validation_attempts": MAX_VALIDATION_ATTEMPTS,
         },
@@ -634,6 +1027,8 @@ def run_autogen_with_pydantic_retries(
             request=request,
             model=selected_model,
             temperature=selected_temp,
+            spinalcord_root=spinalcord_root,
+            attempt=attempt,
         )
 
         #region debug_log_H4_chat_output
@@ -649,55 +1044,47 @@ def run_autogen_with_pydantic_retries(
             },
         )
         #endregion
-        try:
-            discovery = _parse_discovery_from_autogen_text(candidate_text, request=request)
-            # Enforce correlation id consistency (Defense-in-depth).
-            if discovery.correlation_id != request.correlation_id:
-                raise ValueError(
-                    f"correlation_id mismatch: discovery={discovery.correlation_id}, request={request.correlation_id}"
-                )
-            # Write to spinalcord.
-            write_research_discovery(spinalcord_root, discovery)
-            return DiscoveryRunOutcome(success=True, discovery=discovery)
-        except Exception as e:  # noqa: BLE001
-            last_error = {
-                "attempt": attempt,
-                "error_type": type(e).__name__,
-                "error_message": str(e),
-            }
 
-            #region debug_log_H3_schema_mismatch
-            err_data: dict[str, Any] = {
+        ok, discovery, err = _parse_write_discovery(
+            request=request,
+            spinalcord_root=spinalcord_root,
+            candidate_text=candidate_text,
+        )
+        if ok and discovery:
+            return DiscoveryRunOutcome(success=True, discovery=discovery)
+
+        last_error = {"attempt": attempt, **(err or {})}
+
+        #region debug_log_H3_schema_mismatch
+        err_data: dict[str, Any] = {
+            "attempt": attempt,
+            "error_type": (err or {}).get("error_type"),
+            "error_message_prefix": str((err or {}).get("error_message", ""))[:250],
+        }
+        pyd_e = (err or {}).get("pydantic_errors")
+        if pyd_e is not None:
+            err_data["pydantic_errors"] = pyd_e
+        _append_debug_log(
+            hypothesis_id="H3_schema_mismatch",
+            location="run_autogen_with_pydantic_retries:validation_failure",
+            message="Local AutoGen output failed validation/parsing.",
+            data=err_data,
+        )
+        #endregion
+
+        append_rhythm_event(
+            rhythms_root=rhythms_root,
+            hemisphere="lab",
+            event_type="#SYSTEM_VALIDATION_FAILURE",
+            payload={
+                "msg": "ResearchDiscovery validation failed (AutoGen output).",
                 "attempt": attempt,
-                "error_type": type(e).__name__,
-                "error_message_prefix": str(e)[:250],
-            }
-            try:
-                # Pydantic v2 exposes `errors()` for ValidationError.
-                if hasattr(e, "errors"):
-                    err_data["pydantic_errors"] = [d.get("loc", None) for d in e.errors()]  # type: ignore[attr-defined]
-            except Exception:
-                pass
-            _append_debug_log(
-                hypothesis_id="H3_schema_mismatch",
-                location="run_autogen_with_pydantic_retries:validation_failure",
-                message="AutoGen output failed validation/parsing.",
-                data=err_data,
-            )
-            #endregion
-            append_rhythm_event(
-                rhythms_root=rhythms_root,
-                hemisphere="lab",
-                event_type="#SYSTEM_VALIDATION_FAILURE",
-                payload={
-                    "msg": "ResearchDiscovery validation failed (AutoGen output).",
-                    "attempt": attempt,
-                    "request_id": str(request.request_id),
-                    "correlation_id": str(request.correlation_id),
-                    "last_error": last_error,
-                },
-                correlation_id=request.correlation_id,
-            )
+                "request_id": str(request.request_id),
+                "correlation_id": str(request.correlation_id),
+                "last_error": last_error,
+            },
+            correlation_id=request.correlation_id,
+        )
 
     return DiscoveryRunOutcome(success=False, last_error=last_error)
 
@@ -726,7 +1113,7 @@ def write_validation_error_artifact(
         "correlation_id": str(request.correlation_id),
         "schema_version": str(request.schema_version),
         "error": outcome.last_error,
-        "message": "Local AutoGen produced invalid ResearchDiscovery after retries. Orchestrator may escalate.",
+        "message": "AutoGen did not produce a valid ResearchDiscovery after retries. See `error` payload.",
     }
     p.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     return str(p)

@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: shared-schemas
+Version: 0.1.0
+Summary: Sovereign AI OS shared Pydantic schemas (Spinal Cord bridge).
+Requires-Python: >=3.11
+Requires-Dist: pydantic>=2
+Requires-Dist: python-dotenv>=1.0
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"

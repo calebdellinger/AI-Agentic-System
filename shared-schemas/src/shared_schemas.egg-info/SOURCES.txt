@@ -1,0 +1,15 @@
+pyproject.toml
+src/shared_schemas/__init__.py
+src/shared_schemas/config.py
+src/shared_schemas/constitution.py
+src/shared_schemas/decision_record.py
+src/shared_schemas/research_discovery.py
+src/shared_schemas/rhythm_event.py
+src/shared_schemas/versioning.py
+src/shared_schemas/work_order.py
+src/shared_schemas.egg-info/PKG-INFO
+src/shared_schemas.egg-info/SOURCES.txt
+src/shared_schemas.egg-info/dependency_links.txt
+src/shared_schemas.egg-info/requires.txt
+src/shared_schemas.egg-info/top_level.txt
+tests/test_rationale_required.py

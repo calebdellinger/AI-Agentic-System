@@ -24,6 +24,7 @@ from pathlib import Path
 from shared_schemas.rhythm_event import RhythmEventType
 
 from business_trinity.storage.log_writer import append_rhythm_event
+from shared.company_knowledge.paths import summarize_knowledge_mount
 
 
 def _spinalcord_subdirs(spinalcord_root: str) -> dict[str, Path]:
@@ -63,6 +64,15 @@ def main_loop() -> None:
         hemisphere="trinity",
         event_type="#INFO",
         payload={"msg": "Trinity orchestrator scaffold started"},
+    )
+    append_rhythm_event(
+        rhythms_root=rhythms_root,
+        hemisphere="trinity",
+        event_type="#INFO",
+        payload={
+            "msg": "Company knowledge mount (shared with RD-Lab)",
+            **summarize_knowledge_mount(),
+        },
     )
 
     # Scaffolding: keep the container alive while we build Phase 2/3 loops.

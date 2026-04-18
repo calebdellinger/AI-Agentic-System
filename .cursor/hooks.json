@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "hooks": {
+    "stop": [
+      {
+        "command": "python .cursor/hooks/append_quick_log.py",
+        "timeout": 15,
+        "failClosed": false
+      }
+    ]
+  }
+}

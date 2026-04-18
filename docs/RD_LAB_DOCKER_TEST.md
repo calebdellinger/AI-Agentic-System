@@ -2,14 +2,19 @@
 
 ## Do you need a Gemini API key?
 
-**No.** RD-Lab’s AutoGen path uses **`PROVIDER_MODE=LOCAL`** and talks to an **OpenAI-compatible** endpoint (vLLM).  
-You only need **`GOOGLE_API_KEY`** if you later add Gemini as the lab’s LLM (not implemented in the lab loop today).
+**Yes, for the default path.** Compose and shared config default to **`PROVIDER_MODE=GEMINI`**; set **`GOOGLE_API_KEY`** in `.env` so the worker can call Gemini’s OpenAI-compatible API.
+
+For **fully local** runs (no cloud), set **`PROVIDER_MODE=LOCAL`**, point **`VLLM_BASE_URL`** at Ollama/vLLM, and optionally set **`AUTOGEN_ENABLE_GROUPCHAT_LOCAL=true`** once your local model is large enough for GroupChat.
 
 ---
 
 ## What you need running
 
-1. **An OpenAI-compatible API** (pick one):
+**Default (Gemini):** set **`GOOGLE_API_KEY`**, bring up **`rd-lab-worker`** — no local GPU required.
+
+**Optional — local OpenAI-compatible API** (`PROVIDER_MODE=LOCAL`):
+
+1. **OpenAI-compatible server** (pick one):
 
    **A) vLLM in Docker (GPU)**  
    ```bash
@@ -77,6 +82,8 @@ docker cp research-request.json rd-lab-worker:/spinalcord/requests/001.json
 
 | Variable | Purpose |
 |----------|---------|
-| `PROVIDER_MODE` | Must be `LOCAL` for current lab AutoGen code path |
-| `VLLM_BASE_URL` | e.g. `http://vllm-server:8000/v1` or `http://host.docker.internal:8000/v1` |
-| `MODEL_NAME` | Model id passed to AutoGen (must match server) |
+| `PROVIDER_MODE` | Default `GEMINI`; use `LOCAL` for on-prem vLLM/Ollama only |
+| `GOOGLE_API_KEY` | Required when `PROVIDER_MODE=GEMINI` |
+| `VLLM_BASE_URL` | When `LOCAL`: e.g. `http://vllm-server:8000/v1` or `http://host.docker.internal:8000/v1` |
+| `MODEL_NAME` / `CLOUD_*` | Cloud defaults use `CLOUD_LIGHT_MODEL_NAME` / `CLOUD_HEAVY_MODEL_NAME` |
+| `AUTOGEN_ENABLE_GROUPCHAT_LOCAL` | When `LOCAL`, set `true` to use GroupChat on a capable local model |

@@ -22,3 +22,9 @@
 **/.n8n/
 
 .aider*
+
+# Company knowledge — keep source docs; ignore derived vector stores / large indexes
+company-knowledge/vector-index/by-company/**/store/
+company-knowledge/vector-index/by-company/**/*.sqlite3
+company-knowledge/vector-index/by-company/**/*.bin
+company-knowledge/vector-index/by-company/**/chroma/

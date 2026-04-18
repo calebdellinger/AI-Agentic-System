@@ -9,8 +9,10 @@ How:
 
 Contracts:
 - `PROVIDER_MODE` in `{LOCAL, GEMINI, ANTHROPIC}`
+- Default (unset env) is **`GEMINI`** for prototyping against Google AI Studio;
+  set **`PROVIDER_MODE=LOCAL`** for air-gapped / on-prem vLLM when ready.
 - If `PROVIDER_MODE=LOCAL`, local base url must be
-  `http://vllm-server:8000/v1`
+  `http://vllm-server:8000/v1` (or override `VLLM_BASE_URL`).
 - `FALLBACK_PROVIDER_MODE` defines the cloud provider for escalation.
 - Fallback policy is triggered when local Pydantic validation fails 3
   times (orchestrator responsibility), and config provides the decision rule
@@ -41,7 +43,7 @@ class ProviderSettings(BaseModel):
     - Validates environment variables and defines the fallback target.
     """
 
-    provider_mode: ProviderMode = Field(default="LOCAL")
+    provider_mode: ProviderMode = Field(default="GEMINI")
     fallback_provider_mode: ProviderMode = Field(default="GEMINI")
 
     # Required by your spec.
@@ -97,7 +99,7 @@ def get_provider_settings() -> ProviderSettings:
     """
 
     return ProviderSettings(
-        provider_mode=os.getenv("PROVIDER_MODE", "LOCAL"),
+        provider_mode=os.getenv("PROVIDER_MODE", "GEMINI"),
         fallback_provider_mode=os.getenv("FALLBACK_PROVIDER_MODE", "GEMINI"),
         vllm_base_url=os.getenv("VLLM_BASE_URL", "http://vllm-server:8000/v1"),
         model_name=os.getenv("MODEL_NAME"),

@@ -7,15 +7,18 @@ services:
       dockerfile: business-trinity/Dockerfile
     container_name: trinity-api
     environment:
-      - PROVIDER_MODE=${PROVIDER_MODE:-LOCAL}
+      - PROVIDER_MODE=${PROVIDER_MODE:-GEMINI}
       - FALLBACK_PROVIDER_MODE=${FALLBACK_PROVIDER_MODE:-GEMINI}
       - N8N_WORKORDER_WEBHOOK_URL=${N8N_WORKORDER_WEBHOOK_URL:-http://n8n:5678/webhook/trinity-workorder}
       - N8N_WORKORDER_WEBHOOK_SECRET=${N8N_WORKORDER_WEBHOOK_SECRET:-change-me}
       - RHYTHM_STORAGE_ROOT=/rhythms
       - SPINALCORD_ROOT=/spinalcord
+      - COMPANY_KNOWLEDGE_ROOT=/company-knowledge
+      - COMPANY_KNOWLEDGE_SLUG=${COMPANY_KNOWLEDGE_SLUG:-example-regional-concrete}
     volumes:
       - spinalcord:/spinalcord
       - trinity_rhythms:/rhythms
+      - ./company-knowledge:/company-knowledge
     networks:
       - net_internal
 
@@ -57,10 +60,10 @@ services:
       dockerfile: rd-lab/Dockerfile
     container_name: rd-lab-worker
     environment:
-      - PROVIDER_MODE=${PROVIDER_MODE:-LOCAL}
-      # Update VLLM_BASE_URL in .env to http://ollama:11434/v1 to use Ollama
+      - PROVIDER_MODE=${PROVIDER_MODE:-GEMINI}
+      # When PROVIDER_MODE=LOCAL: point at Ollama/vLLM (e.g. http://ollama:11434/v1).
       - VLLM_BASE_URL=${VLLM_BASE_URL:-http://ollama:11434/v1}
-      - MODEL_NAME=${MODEL_NAME:-llama3.2:1b}
+      - MODEL_NAME=${MODEL_NAME:-gemini-2.5-flash-lite}
       # Throttle policy model knobs (used when constraints.compute_tier
       # requests/allow light vs heavy selection).
       - LOCAL_LIGHT_MODEL_NAME=${LOCAL_LIGHT_MODEL_NAME:-${MODEL_NAME:-llama3.2:1b}}
@@ -69,17 +72,32 @@ services:
       - AUTOGEN_TEMPERATURE_HEAVY=${AUTOGEN_TEMPERATURE_HEAVY:-0.1}
       # How many attempts to allow on the light model before upgrading.
       - LOCAL_MAX_LIGHT_ATTEMPTS=${LOCAL_MAX_LIGHT_ATTEMPTS:-1}
+      # AutoGen: default cloud is Gemini (PROVIDER_MODE=GEMINI + GOOGLE_API_KEY).
+      # Local-only: PROVIDER_MODE=LOCAL; optional AUTOGEN_ENABLE_GROUPCHAT_LOCAL=true for GroupChat on big local models.
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - AUTOGEN_ENABLE_GROUPCHAT_LOCAL=${AUTOGEN_ENABLE_GROUPCHAT_LOCAL:-false}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GEMINI_OPENAI_BASE_URL=${GEMINI_OPENAI_BASE_URL:-}
+      - AUTOGEN_OPENAI_BASE_URL=${AUTOGEN_OPENAI_BASE_URL:-}
+      - AUTOGEN_OPENAI_API_KEY=${AUTOGEN_OPENAI_API_KEY:-}
+      - CLOUD_LIGHT_MODEL_NAME=${CLOUD_LIGHT_MODEL_NAME:-gemini-2.5-flash-lite}
+      - CLOUD_HEAVY_MODEL_NAME=${CLOUD_HEAVY_MODEL_NAME:-gemini-2.5-flash}
       - RHYTHM_STORAGE_ROOT=/rhythms
       - SPINALCORD_ROOT=/spinalcord
+      - COMPANY_KNOWLEDGE_ROOT=/company-knowledge
+      - COMPANY_KNOWLEDGE_SLUG=${COMPANY_KNOWLEDGE_SLUG:-example-regional-concrete}
     volumes:
       - spinalcord:/spinalcord
       - lab_rhythms:/rhythms
+      # Shared curated knowledge (both hemispheres). Vector indexes live under vector-index/.
+      - ./company-knowledge:/company-knowledge
       # Debug mode: mount workspace so instrumentation can write
       # `debug-ee17f7.log` back to the host for analysis.
       - .:/workspace
     networks:
       - net_lab
       - net_llm
+      - net_egress
 
   trinity-ui:
     build:
@@ -105,6 +123,10 @@ services:
       - WEBHOOK_URL=${WEBHOOK_URL:-http://localhost:5678}
       - NODE_ENV=production
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:-change-me}
+      - N8N_WORKORDER_WEBHOOK_SECRET=${N8N_WORKORDER_WEBHOOK_SECRET:-change-me}
+      - NOTION_API_TOKEN=${NOTION_API_TOKEN:-}
+      - NOTION_API_VERSION=${NOTION_API_VERSION:-2022-06-28}
+      - NOTION_DATABASE_ID=${NOTION_DATABASE_ID:-}
     volumes:
       - n8n_data:/home/node/.n8n
     networks:
@@ -122,3 +144,5 @@ networks:
   net_lab:
     internal: true
   net_llm:
+  # Rationale: `net_lab` is internal-only; attach this bridge for optional cloud API egress.
+  net_egress:

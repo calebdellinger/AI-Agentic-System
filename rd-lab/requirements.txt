@@ -8,11 +8,10 @@
 pydantic>=2
 python-dotenv>=1.0
 
-# Agentic framework (used once we implement the debate/innovation loop)
-autogen
+# Agentic framework (0.2.x API: `from autogen import ...`).
+# Pin <0.3 so pip does not install the pyautogen 0.10+ proxy that drops the `autogen` import.
+pyautogen>=0.2,<0.3
 
-# Rationale: AutoGen's OpenAIWrapper needs the `openai` module.
-# How: Install the required extra so the LOCAL OpenAI-compatible client works.
-# Contracts: Enables AutoGen to talk to vLLM/Ollama via OpenAI-compatible API.
-ag2[openai]
+# Rationale: AutoGen's OpenAI client path needs the `openai` package.
+openai>=1
 
